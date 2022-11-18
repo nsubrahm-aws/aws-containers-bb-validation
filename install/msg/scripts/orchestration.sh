@@ -1,0 +1,102 @@
+#!/bin/bash
+
+set -e
+
+# Create SNS topic
+t_setup() {
+  TNAME=$1
+
+  TOPIC_ARN=`aws sns create-topic --name ${TNAME} --query 'TopicArn' --output text`
+  echo "Topic Name ${TNAME} Topic ARN ${TOPIC_ARN}"
+}
+
+# Create SQS queue
+q_setup() {
+  SQS_ACCESS_POLICY_TMPL=../json/sqs-access-policy-template.json
+  POLICY_DOC=../json/policy-doc.json
+  SQS_ACCESS_POLICY=../json/sqs-access-policy.json
+
+  QNAME=$1
+  REGION_ID=$2
+  ACCOUNT_ID=$3
+
+  Q_URL=`aws sqs create-queue --queue-name ${QNAME} --query 'QueueUrl' --output text`
+
+  jq --arg REGION ${REGION_ID} --arg ACCOUNTID ${ACCOUNT_ID} --arg QNAME ${QNAME} 'walk( 
+    if type == "string" 
+    then gsub("\\$(?<name>\\w+)"; $ARGS.named[.name]) 
+    else . end 
+  )' ${SQS_ACCESS_POLICY_TMPL} > ${POLICY_DOC}
+  P=`tr -d '\n' < ${POLICY_DOC}`
+  POLICY_DOC_STR=$(echo ${P//\"/\\\"})
+
+  echo '{"Policy": "'${POLICY_DOC_STR}'"}' > ${SQS_ACCESS_POLICY}
+  aws sqs set-queue-attributes --queue-url ${Q_URL} --attributes file://${SQS_ACCESS_POLICY}
+  aws sqs set-queue-attributes --queue-url ${Q_URL} --attributes MessageRetentionPeriod=300,ReceiveMessageWaitTimeSeconds=2
+
+  rm ${POLICY_DOC} ${SQS_ACCESS_POLICY}
+  echo "Queue name ${QNAME} Queue URL ${Q_URL}"
+}
+
+# Create SNS subscriptions with provided SNS topic and SQS queue names
+s_setup() {
+  QNAME=$1
+  TNAME=$2
+  REGION_ID=$3
+  ACCOUNT_ID=$4
+
+  QUEUE_ARN=arn:aws:sqs:${REGION_ID}:${ACCOUNT_ID}:${QNAME}
+  TOPIC_ARN=arn:aws:sns:${REGION_ID}:${ACCOUNT_ID}:${TNAME}
+  SUBS_ARN=`aws sns subscribe --topic-arn ${TOPIC_ARN} --protocol sqs --notification-endpoint ${QUEUE_ARN} --attributes RawMessageDelivery=true --query 'SubscriptionArn' --output text`
+  echo "Topic name ${TNAME} Queue name ${QNAME} Subscription ARN ${SUBS_ARN}"
+}
+
+# Create all topics for Orchestration demo
+t_create() {
+  echo 'Setting up topics for Orders microservice'
+  t_setup 'orders-success'
+  t_setup 'orders-fail'
+
+  echo 'Setting up topics for Inventory microservice'
+  t_setup 'inventory-success'
+  t_setup 'inventory-fail'
+}
+
+# Create all queues for Orchestration demo
+q_create() {
+  REGION_ID=$1
+  ACCOUNT_ID=$2
+
+  echo 'Creating queues for Orchestration'
+
+  echo 'Setting up queues for Orders microservice'
+  q_setup 'orders-rollback' ${REGION_ID} ${ACCOUNT_ID}
+
+  echo 'Setting up queues for Inventory microservice'
+  q_setup 'inventory-input' ${REGION_ID} ${ACCOUNT_ID}
+
+  echo 'Setting up queues for Orchestration microservice'
+  q_setup 'orchestrator' ${REGION_ID} ${ACCOUNT_ID}
+}
+
+# Create subscriptions using topics and queues created above for Orchestration demo
+s_create() {
+  REGION_ID=$1
+  ACCOUNT_ID=$2
+
+  echo 'Setting up subscriptions for Orchestrator microservice'
+  s_setup 'orchestrator' 'orders-success' ${REGION_ID} ${ACCOUNT_ID}
+}
+
+# Main
+if [[ $# -ne 2 ]] ; then
+  echo 'USAGE: ./orchestration.sh regionId accountId'
+  exit 1
+fi
+
+REGION_ID=$1
+ACCOUNT_ID=$2
+
+t_create
+q_create ${REGION_ID} ${ACCOUNT_ID}
+s_create ${REGION_ID} ${ACCOUNT_ID}
