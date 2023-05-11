@@ -1,0 +1,127 @@
+#.github/actions/terragrunt-action/action.yml
+name: "Terragrunt Plan and Apply"
+
+inputs:
+  apply:
+    description: "Whether the job should apply after plan"
+    default: false
+  directory:
+    description: "Directory to run Terragrunt in."
+    default: "."
+    required: true
+  outputs:
+    description: "Whether outputs should be returned"
+    default: false
+  environment_name:
+    description: "Environment/AWS Account being targeted."
+    default: "dev"
+    required: true
+  aws_region:
+    description: "AWS Region being targeted."
+    default: "us-east-1"
+    required: true
+  role_to_assume:
+    description: "Role to assume when running Terraform/Terragrunt."
+    required: true
+  terragrunt_version:
+    description: "Version of Terragrunt to use."
+    default: "0.38.5"
+    required: true
+  terrafom_version:
+    description: "Version of Terraform to use."
+    default: "1.2.4"
+    required: true
+
+outputs:
+  repository_name:
+    description: "Name of the repository for the function."
+    value: ${{ steps.tg-get-outputs.outputs.repository_name }}
+  
+runs:
+  using: "composite"
+  
+  steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+      
+    #----------------------------------------------
+    # ----- Authenticate With AWS assume role -----
+    #----------------------------------------------
+    - name: GitHub OIDC Auth to assume AWS Role
+      uses: aws-actions/configure-aws-credentials@master
+      with:
+          role-to-assume: ${{ inputs.role_to_assume }}
+          aws-region: ${{ inputs.aws_region }}
+          mask-aws-account-id: no
+    
+    #----------------------------------------------
+    # --- Setup Terraform with specific version ---
+    #----------------------------------------------
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v2
+      with:
+        terraform_version: ${{ inputs.terraform_version }}
+        terraform_wrapper: false
+
+    #----------------------------------------------
+    #--- Setup Terragrunt with specific version ---
+    #----------------------------------------------
+    - name: Setup Terragrunt
+      run: |
+        sudo wget -q -O /bin/terragrunt "https://github.com/gruntwork-io/terragrunt/releases/download/v${{ inputs.terragrunt_version }}/terragrunt_linux_amd64"
+        sudo chmod +x /bin/terragrunt
+        terragrunt -v
+      shell: bash
+      
+    #------------------------------------------------------------------
+    # -----  Validate Terraform Modules for specific environment  -----
+    #------------------------------------------------------------------
+    - name: Terragrunt Validate ${{ inputs.environment_name }}
+      if: ${{ fromJSON(inputs.apply) == false }}
+      id: tg-validate
+      run: |
+        cd terraform/infrastructure/${{ inputs.environment_name }}
+        terragrunt run-all validate --terragrunt-include-dir "${{ inputs.directory }}" --terragrunt-strict-include
+      shell: bash
+
+    #------------------------------------------------------------------
+    # -----  Plan Terraform Modules for specific environment  -----
+    #------------------------------------------------------------------
+    - name: Terragrunt Plan ${{ inputs.environment_name }}
+      if: ${{ fromJSON(inputs.apply) == false }}
+      id: tg-plan
+      run: |
+        # Set environment variables for Terraform
+        export COMMIT_HASH=$(git rev-parse --short HEAD)
+        
+        cd terraform/infrastructure/${{ inputs.environment_name }}
+        terragrunt run-all plan --terragrunt-include-dir "${{ inputs.directory }}" --terragrunt-strict-include
+      shell: bash
+      
+    #--------------------------------------------------------------------------------------
+    # -----  Apply Terraform Modules for specific environment if input apply is true  -----
+    #--------------------------------------------------------------------------------------
+    - name: Terragrunt Apply ${{ inputs.environment_name }}
+      if: ${{ fromJSON(inputs.apply) == true }}
+      id: tg-apply
+      run: |
+        # Set environment variables for Terraform
+        export COMMIT_HASH=$(git rev-parse --short HEAD)
+
+        cd terraform/infrastructure/${{ inputs.environment_name }}
+        terragrunt run-all apply --terragrunt-non-interactive --terragrunt-include-dir "${{ inputs.directory }}" --terragrunt-strict-include
+      shell: bash
+
+    #--------------------------------------------------------------------------
+    # -----  Get outputs from Terraform Modules of lambda functions  -----
+    #--------------------------------------------------------------------------
+    - name: Terragrunt get-outputs ${{ inputs.environment_name }}
+      if: ${{ fromJSON(inputs.outputs) == true }}
+      id: tg-get-outputs
+      run: |
+        cd terraform/infrastructure/${{ inputs.environment_name }}
+
+        cd ${{ inputs.directory }}
+        export REPOSITORY_NAME=$(terragrunt output --raw repository_url)
+        echo "::set-output name=repository_name::$REPOSITORY_NAME"
+      shell: bash

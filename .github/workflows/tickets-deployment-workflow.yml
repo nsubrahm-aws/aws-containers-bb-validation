@@ -1,0 +1,68 @@
+name: Tickets Deployment Workflow
+
+on:
+  - workflow_dispatch
+  - push:
+      # run the workflow only on changes
+      # to the main branch and the paths below
+      branches:
+        - main
+      paths:
+        - "apps/tickets/**"
+        - ".github/workflows/tickets-deployment-workflow.yml"
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  ENVIRONMENT: "prod"
+
+jobs:
+  #----------------------------------------------
+  # ------------- Create ECR  Repo --------------
+  #----------------------------------------------
+  create_ecr_repo:
+    name: 'Create ECR Repo'
+    runs-on: ubuntu-latest
+    outputs:
+      repository_url: ${{ steps.create_ecr_repo.outputs.repository_name }}
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+      - name: Create ECR Repo
+        id: create_ecr_repo
+        uses: ./.github/actions/terragrunt-custom-action
+        with:
+          directory: ecr/tickets
+          environment_name: ${{ env.ENVIRONMENT }}
+          aws_region: ${{ env.AWS_REGION }}
+          role_to_assume: ${{ secrets.ROLE_TO_ASSUME }}
+          outputs: true
+          apply: true
+
+
+  #----------------------------------------------
+  # -------- Build and Push Docker Image --------
+  #----------------------------------------------
+  docker_build_push_image:
+    name: 'Docker Build and Push Image'
+    runs-on: ubuntu-latest
+    needs: [create_ecr_repo]
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+      - name: Get SHA for image tag
+        id: get-sha
+        run: echo "::set-output name=sha_short::$(git rev-parse --short HEAD)"
+      - name: Docker Build and Push Image
+        id: docker-build-push
+        uses: ./.github/actions/docker-action
+        with:
+          aws_region: ${{ env.AWS_REGION }}
+          role_to_assume: ${{ secrets.ROLE_TO_ASSUME }}
+          image_name: ${{ needs.create_ecr_repo.outputs.repository_url }}
+          image_tag: ${{ steps.get-sha.outputs.sha_short }}
+          context: ./apps/tickets/src
+          dockerfile: ./apps/tickets/src/Dockerfile
