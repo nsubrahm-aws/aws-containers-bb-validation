@@ -1,0 +1,5 @@
+# Common Inputs:
+--- 
+environment: "prod"
+name: "blackbelt"
+region: "us-east-1"
